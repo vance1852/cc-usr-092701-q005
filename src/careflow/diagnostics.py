@@ -50,6 +50,7 @@ class ConsistencyChecker:
         self.check_incident_ledger()
         self.check_signed_records()
         self.check_duplicate_active_reservations()
+        self.check_measurement_import_review()
         chain = audit.verify_chain(self.connection, self.clinic_id)
         if not chain["ok"]:
             self.add("audit.chain_mismatch", "critical", "clinic", self.clinic_id,
@@ -204,6 +205,19 @@ class ConsistencyChecker:
             self.add("encounter.signature_mismatch", "high", "encounter", row["id"],
                      {"patient_id": row["patient_id"], "state": row["state"], "signed_by": row["signed_by"],
                       "signed_at": row["signed_at"], "version": row["version"]}, "保留就诊原文并由临床负责人复核签署凭据。")
+
+    def check_measurement_import_review(self) -> None:
+        rows = self.connection.execute(
+            "SELECT b.id,b.source,b.created_at,COUNT(*) AS pending "
+            "FROM measurement_import_rows r JOIN measurement_import_batches b ON b.id=r.batch_id "
+            "WHERE b.clinic_id=? AND r.status='quarantined' "
+            "AND NOT EXISTS (SELECT 1 FROM measurement_import_batches n WHERE n.supersedes_batch_id=b.id) "
+            "GROUP BY b.id ORDER BY b.created_at,b.id", (self.clinic_id,)).fetchall()
+        for row in rows:
+            self.add("measurement_import.rows_pending_review", "low", "measurement_import", row["id"],
+                     {"source": row["source"], "quarantined_rows": row["pending"],
+                      "batch_created_at": row["created_at"]},
+                     "在待核对清单中逐行核对原始文件，必要时以更正批次重新提交。")
 
     def check_duplicate_active_reservations(self) -> None:
         rows = self.connection.execute(

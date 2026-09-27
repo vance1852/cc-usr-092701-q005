@@ -17,7 +17,7 @@
 - `POST /patients/{patient_id}/consents` 创建更高版本的授权；`POST /consents/{consent_id}/withdraw` 撤回授权。
 - `POST /patients/{patient_id}/plans` 建立计划，医美和体重管理计划必须引用当前对应授权。
 - `POST /plans/{plan_id}/{propose|activate|pause|resume|complete|cancel}` 以 `expected_version` 执行带版本保护的状态转换。
-- `GET /patients/{patient_id}/weight-series` 返回按观察时间排序的测量值，不生成诊断或治疗建议。
+- `GET /patients/{patient_id}/weight-series` 返回按观察时间排序的测量值，不生成诊断或治疗建议。每个测量点以 `provenance` 区分患者自报、临床记录与设备导入；导入点附 `import_ref`（批次编号、原始行号、来源与格式版本），可沿记录回溯原文件对应行。
 
 评估签署后不可覆盖。就诊病历由章节组成，签署需要主诉、评估和计划三部分；签署后的补充内容成为新版本，原始文字仍保留。
 
@@ -43,9 +43,19 @@
 
 `POST /patients/{patient_id}/export` 只在存在有效数据导出授权时返回明确选择的章节。导出字段采用白名单，联系方式密文、凭据和内部合并字段不会导出；相同幂等请求得到相同内容摘要。`GET /reports/daily`、`appointments`、`incidents` 和 `overdue-milestones` 仅返回运营汇总或经岗位授权的工作队列。
 
+## 设备测量批量导入
+
+- `POST /imports/measurements` 提交合作秤 CSV 文件，字段为 `source`、`format_version`（当前支持 `scale-csv-v1`，列：`patient_ref,measured_at,value,unit`）、`content`；可选 `supersedes_batch_id` 表示对既有批次的更正提交。批次保留来源、格式版本与内容摘要；内容摘要在诊所内唯一，相同文件重传返回原批次处理结果（`replayed=true`），相同内容以不同来源、格式或更正关系提交会被拒绝。
+- 导入按行隔离：无法识别患者、设备本地时间无效或异常、单位不符（仅接受 kg）、数值越界的行进入待核对清单，不影响其他行写入观察记录，错误数值不会成为正式记录。同一患者同一时间同一数值的测量标记为重复且不重复写入；同一时间不同数值且非更正提交的行进入待核对。
+- `GET /imports/measurements/{batch_id}` 返回批次摘要与每行处理结果：原始行号、状态、问题代码、行内容摘要及关联观察记录编号。
+- `GET /imports/measurements/review` 返回全诊所待核对清单，含批次来源、格式版本、原始行内容与行摘要。
+- 更正提交的返回中包含 `changes`，按原始行号列明新增、删除、变更与未变的行及变更前后内容。同一行号的新数值以更正记录追加到原观察（`correction_of`），不改写旧值；原记录已有更正或更正行患者不一致的行进入待核对，需人工处理。每个批次只能被一个后续批次更正。
+- 巡检会对仍有待核对行且未被更正的批次给出 `measurement_import.rows_pending_review` 提示，不自动修改业务状态。
+
 ## 主要状态
 
 - 计划：草稿 → 提议 → 生效；可暂停和恢复，完成或取消后不能重新激活。
 - 预约：占位 → 确认 → 到诊 → 服务中 → 完成；取消和未到诊是独立终态。
 - 不良事件：已报告 → 分诊 → 观察 → 已解决 → 关闭。每次处置单独记录操作人和理由。
 - 耗材预留：预留 → 释放或核销。库存数量由收货、预留、释放和更正流水求和，不直接改写历史数量。
+- 导入行：已导入、重复或待核对。批次按内容摘要幂等，更正批次以行号对照并列明变更行。

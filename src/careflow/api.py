@@ -223,6 +223,16 @@ def create_handler(app: Careflow):
                 params = parse_qs(path.query)
                 return app.reports.weight_series(clinic_id, actor_id, segments[1],
                                                  start=params.get("start", [None])[0], end=params.get("end", [None])[0]), 200
+            if self.command == "POST" and segments == ["imports", "measurements"]:
+                data = self.body()
+                return app.imports.submit(clinic_id, actor_id, data.get("source", ""), data.get("format_version", ""),
+                                          data.get("content", ""),
+                                          supersedes_batch_id=data.get("supersedes_batch_id")), 201
+            if self.command == "GET" and segments == ["imports", "measurements", "review"]:
+                params = parse_qs(path.query)
+                return app.imports.review_queue(clinic_id, actor_id, limit=int(params.get("limit", [200])[0])), 200
+            if self.command == "GET" and len(segments) == 3 and segments[0] == "imports" and segments[1] == "measurements":
+                return app.imports.get_batch(clinic_id, actor_id, segments[2]), 200
             if len(segments) == 3 and segments[0] == "patients" and segments[2] == "plan-history" and self.command == "GET":
                 return app.reports.plan_history(clinic_id, actor_id, segments[1]), 200
             if len(segments) == 3 and segments[0] == "patients" and segments[2] == "export" and self.command == "POST":

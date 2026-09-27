@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import StorageFailure
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -303,6 +303,41 @@ CREATE TABLE IF NOT EXISTS observations (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS observations_patient_kind_time ON observations(patient_id,kind,observed_at);
+CREATE TABLE IF NOT EXISTS measurement_import_batches (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    source TEXT NOT NULL,
+    format_version TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    supersedes_batch_id TEXT REFERENCES measurement_import_batches(id),
+    row_count INTEGER NOT NULL,
+    imported_count INTEGER NOT NULL,
+    duplicate_count INTEGER NOT NULL,
+    quarantined_count INTEGER NOT NULL,
+    imported_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(clinic_id,content_sha256)
+);
+CREATE INDEX IF NOT EXISTS import_batches_clinic_time ON measurement_import_batches(clinic_id,created_at);
+CREATE TABLE IF NOT EXISTS measurement_import_rows (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES measurement_import_batches(id),
+    row_number INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('imported','duplicate','quarantined')),
+    issue TEXT,
+    detail TEXT,
+    patient_ref TEXT,
+    measured_at TEXT,
+    value_num REAL,
+    unit TEXT,
+    raw_line TEXT NOT NULL,
+    row_digest TEXT NOT NULL,
+    observation_id TEXT REFERENCES observations(id),
+    correction_of TEXT REFERENCES observations(id),
+    UNIQUE(batch_id,row_number)
+);
+CREATE INDEX IF NOT EXISTS import_rows_observation ON measurement_import_rows(observation_id);
+CREATE INDEX IF NOT EXISTS import_rows_batch_status ON measurement_import_rows(batch_id,status);
 CREATE TABLE IF NOT EXISTS clinical_flags (
     id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(id),

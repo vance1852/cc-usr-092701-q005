@@ -37,11 +37,13 @@ class Careflow:
         from .exports import PatientExportService
         from .milestones import MilestoneService
         from .clinical_flags import ClinicalFlagService
+        from .imports import MeasurementImportService
         self.supplies = SupplyService(self.db, self.clock)
         self.reports = ReportService(self.db, self.clock)
         self.exports = PatientExportService(self.db, self.clock)
         self.milestones = MilestoneService(self.db, self.clock)
         self.clinical_flags = ClinicalFlagService(self.db, self.clock)
+        self.imports = MeasurementImportService(self.db, self.clock)
 
     def now(self) -> str:
         return timestamp(self.clock.now())

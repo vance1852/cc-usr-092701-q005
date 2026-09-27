@@ -165,11 +165,20 @@ class ReportService:
             corrected_ids = {row["correction_of"] for row in rows if row["correction_of"]}
             effective = [row for row in rows if row["correction_of"] is not None or row["id"] not in corrected_ids]
             effective.sort(key=lambda row: (row["observed_at"], row["id"]))
+            import_refs = {}
+            if effective:
+                marks = ",".join("?" for _ in effective)
+                for ref in connection.execute(
+                        "SELECT r.observation_id,r.batch_id,r.row_number,b.source,b.format_version "
+                        "FROM measurement_import_rows r JOIN measurement_import_batches b ON b.id=r.batch_id "
+                        f"WHERE r.observation_id IN ({marks})", [row["id"] for row in effective]).fetchall():
+                    import_refs[ref["observation_id"]] = {"batch_id": ref["batch_id"], "row_number": ref["row_number"],
+                                                          "source": ref["source"], "format_version": ref["format_version"]}
             values = []
             for row in effective:
                 values.append({"id": row["id"], "observed_at": row["observed_at"], "weight_kg": row["value_num"],
                                "recorded_by": row["recorded_by"], "provenance": row["provenance"],
-                               "corrects": row["correction_of"]})
+                               "corrects": row["correction_of"], "import_ref": import_refs.get(row["id"])})
             delta = round(values[-1]["weight_kg"] - values[0]["weight_kg"], 2) if len(values) >= 2 else None
             return {"patient_id": patient_id, "patient_ref": patient["external_ref"], "patient_state": patient["state"],
                     "observations": values, "count": len(values), "first_to_last_delta_kg": delta,

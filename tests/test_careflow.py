@@ -290,5 +290,180 @@ class CareflowCase(unittest.TestCase):
             thread.join(timeout=3)
 
 
+    def import_csv(self, content, *, source="partner-scale-a", supersedes=None, actor=None):
+        return self.app.imports.submit(self.clinic, actor or self.nurse, source, "scale-csv-v1",
+                                       content, supersedes_batch_id=supersedes)
+
+    def test_measurement_import_quarantines_bad_rows_and_replays_batch(self):
+        content = (
+            "patient_ref,measured_at,value,unit\n"
+            "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n"
+            "case-017,2026-09-27T07:32:00+08:00,72.1,kg\n"
+            "ghost-999,2026-09-26T07:33:00+08:00,80.0,kg\n"
+            "case-017,2026-09-26T07:34:00+08:00,145.2,jin\n"
+            "case-017,2026-09-26T07:35:00+08:00,812.0,kg\n"
+            "case-017,not-a-time,71.9,kg\n"
+            "case-017,2027-05-01T07:00:00+08:00,70.0,kg\n"
+        )
+        result = self.import_csv(content)
+        self.assertFalse(result["replayed"])
+        self.assertEqual((result["row_count"], result["imported"], result["quarantined"]), (7, 2, 5))
+        self.assertEqual(result["format_version"], "scale-csv-v1")
+        self.assertEqual(len(result["content_sha256"]), 64)
+        replay = self.import_csv(content)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["batch_id"], result["batch_id"])
+        with self.assertRaises(Conflict):
+            self.import_csv(content, source="other-scale")
+        series = self.app.reports.weight_series(self.clinic, self.clinician, self.patient["id"])
+        self.assertEqual([row["weight_kg"] for row in series["observations"]], [72.4, 72.1])
+        self.assertEqual({row["provenance"] for row in series["observations"]}, {"import"})
+        first_ref = series["observations"][0]["import_ref"]
+        self.assertEqual(first_ref["batch_id"], result["batch_id"])
+        self.assertEqual(first_ref["row_number"], 2)
+        self.assertEqual(first_ref["source"], "partner-scale-a")
+        queue = self.app.imports.review_queue(self.clinic, self.nurse)
+        self.assertEqual(queue["total_quarantined"], 5)
+        self.assertEqual({item["issue"] for item in queue["items"]},
+                         {"unknown_patient", "unit_mismatch", "value_out_of_range",
+                          "bad_timestamp", "future_timestamp"})
+        detail = self.app.imports.get_batch(self.clinic, self.clinician, result["batch_id"])
+        self.assertEqual(detail["content_sha256"], result["content_sha256"])
+        rows = {row["row_number"]: row for row in detail["rows"]}
+        self.assertEqual(rows[4]["issue"], "unknown_patient")
+        self.assertIsNone(rows[4]["observation_id"])
+        self.assertEqual(rows[5]["issue"], "unit_mismatch")
+        self.assertTrue(rows[5]["raw_line"].endswith("jin"))
+        self.assertEqual(rows[2]["status"], "imported")
+        self.assertTrue(rows[2]["observation_id"])
+        self.assertEqual(len(rows[2]["row_digest"]), 64)
+        # 重传不产生新的观察记录；待核对行从未写入正式记录。
+        self.assertEqual(len(self.app.observation_series(self.clinic, self.clinician,
+                                                         self.patient["id"], "weight_kg")), 2)
+
+    def test_measurement_import_marks_duplicates_and_conflicts(self):
+        manual = self.app.record_observation(self.clinic, self.clinician, self.patient["id"], "weight_kg", 72.4,
+                                             "2026-09-26T07:31:00+08:00")
+        content = (
+            "patient_ref,measured_at,value,unit\n"
+            "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n"
+            "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n"
+            "case-017,2026-09-26T08:00:00+08:00,75.9,kg\n"
+            "case-017,2026-09-26T08:00:00+08:00,76.8,kg\n"
+        )
+        result = self.import_csv(content)
+        self.assertEqual((result["imported"], result["duplicates"], result["quarantined"]), (1, 2, 1))
+        rows = {row["row_number"]: row
+                for row in self.app.imports.get_batch(self.clinic, self.nurse, result["batch_id"])["rows"]}
+        self.assertEqual(rows[2]["status"], "duplicate")
+        self.assertEqual(rows[2]["observation_id"], manual["id"])
+        self.assertEqual(rows[3]["status"], "duplicate")
+        self.assertEqual(rows[5]["issue"], "conflicting_value")
+        series = self.app.reports.weight_series(self.clinic, self.clinician, self.patient["id"])
+        self.assertEqual([row["weight_kg"] for row in series["observations"]], [72.4, 75.9])
+
+    def test_corrected_batch_appends_corrections_and_shows_changed_rows(self):
+        first = self.import_csv(
+            "patient_ref,measured_at,value,unit\n"
+            "case-017,2026-09-25T07:31:00+08:00,72.4,kg\n"
+            "case-017,2026-09-26T07:32:00+08:00,72.1,kg\n"
+            "case-017,2026-09-27T07:30:00+08:00,71.8,kg\n")
+        self.assertEqual(first["imported"], 3)
+        corrected_content = (
+            "patient_ref,measured_at,value,unit\n"
+            "case-017,2026-09-25T07:31:00+08:00,72.4,kg\n"
+            "case-017,2026-09-26T07:32:00+08:00,70.9,kg\n"
+            "case-017,2026-09-27T07:30:00+08:00,71.8,kg\n"
+            "case-017,2026-09-27T08:45:00+08:00,71.5,kg\n"
+        )
+        corrected = self.import_csv(corrected_content, supersedes=first["batch_id"])
+        self.assertEqual(corrected["supersedes_batch_id"], first["batch_id"])
+        self.assertEqual((corrected["imported"], corrected["duplicates"]), (2, 2))
+        changes = corrected["changes"]
+        self.assertEqual(changes["basis_batch_id"], first["batch_id"])
+        self.assertEqual(changes["changed_count"], 1)
+        self.assertEqual(changes["changed_rows"][0]["row_number"], 3)
+        self.assertEqual(changes["changed_rows"][0]["before"]["value"], 72.1)
+        self.assertEqual(changes["changed_rows"][0]["after"]["value"], 70.9)
+        self.assertEqual(changes["added_rows"], [5])
+        self.assertEqual(changes["unchanged_count"], 2)
+        series = self.app.reports.weight_series(self.clinic, self.clinician, self.patient["id"])
+        self.assertEqual([row["weight_kg"] for row in series["observations"]], [72.4, 70.9, 71.8, 71.5])
+        correction = next(row for row in series["observations"] if row["weight_kg"] == 70.9)
+        self.assertTrue(correction["corrects"])
+        self.assertEqual(correction["import_ref"]["batch_id"], corrected["batch_id"])
+        self.assertEqual(correction["import_ref"]["row_number"], 3)
+        # 原记录保留不改写，更正以追加方式指向原记录。
+        all_rows = self.app.observation_series(self.clinic, self.clinician, self.patient["id"], "weight_kg")
+        self.assertEqual(len(all_rows), 5)
+        original = next(row for row in all_rows if row["id"] == correction["corrects"])
+        self.assertEqual(original["value"], 72.1)
+        replay = self.import_csv(corrected_content, supersedes=first["batch_id"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["batch_id"], corrected["batch_id"])
+        self.assertEqual(replay["changes"], corrected["changes"])
+        # 同一批次只能被更正一次，后续修正须基于最新批次。
+        with self.assertRaises(Conflict):
+            self.import_csv("patient_ref,measured_at,value,unit\n"
+                            "case-017,2026-09-25T07:31:00+08:00,72.4,kg\n",
+                            supersedes=first["batch_id"])
+
+    def test_import_permissions_clinic_boundary_and_pending_review_diagnostic(self):
+        with self.assertRaises(Forbidden):
+            self.import_csv("patient_ref,measured_at,value,unit\n"
+                            "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n", actor=self.coordinator)
+        first = self.import_csv("patient_ref,measured_at,value,unit\n"
+                                "ghost-1,2026-09-26T07:31:00+08:00,72.4,kg\n")
+        codes = {item["code"] for item in self.app.run_diagnostics(self.clinic, self.owner)["findings"]}
+        self.assertIn("measurement_import.rows_pending_review", codes)
+        other = self.app.create_clinic("另一诊所", "UTC")
+        outsider = self.app.create_staff(other["id"], "负责人", "owner")
+        with self.assertRaises(NotFound):
+            self.app.imports.get_batch(other["id"], outsider["id"], first["batch_id"])
+        # 更正批次解决待核对行后，巡检不再提示该批次。
+        fixed = self.import_csv("patient_ref,measured_at,value,unit\n"
+                                "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n",
+                                supersedes=first["batch_id"])
+        self.assertEqual(fixed["imported"], 1)
+        self.assertEqual(fixed["changes"]["changed_count"], 1)
+        codes = {item["code"] for item in self.app.run_diagnostics(self.clinic, self.owner)["findings"]}
+        self.assertNotIn("measurement_import.rows_pending_review", codes)
+
+    def test_http_measurement_import_roundtrip(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(self.app))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        headers = {"X-Clinic-ID": self.clinic, "Content-Type": "application/json"}
+        try:
+            request = Request(base + "/auth/token", data=json.dumps({"staff_id": self.owner,
+                            "password": "LongPassphrase!2026"}).encode(), method="POST", headers=headers)
+            with urlopen(request, timeout=3) as response:
+                token = json.loads(response.read())["access_token"]
+            headers["Authorization"] = f"Bearer {token}"
+            content = ("patient_ref,measured_at,value,unit\n"
+                       "case-017,2026-09-26T07:31:00+08:00,72.4,kg\n"
+                       "case-017,2026-09-26T07:34:00+08:00,145.2,jin\n")
+            request = Request(base + "/imports/measurements",
+                              data=json.dumps({"source": "partner-scale-a", "format_version": "scale-csv-v1",
+                                               "content": content}).encode(), method="POST", headers=headers)
+            with urlopen(request, timeout=3) as response:
+                batch = json.loads(response.read())
+                self.assertEqual(response.status, 201)
+            self.assertEqual((batch["imported"], batch["quarantined"]), (1, 1))
+            request = Request(base + f"/imports/measurements/{batch['batch_id']}", headers=headers)
+            with urlopen(request, timeout=3) as response:
+                detail = json.loads(response.read())
+            self.assertEqual(len(detail["rows"]), 2)
+            request = Request(base + "/imports/measurements/review", headers=headers)
+            with urlopen(request, timeout=3) as response:
+                queue = json.loads(response.read())
+            self.assertEqual(queue["items"][0]["issue"], "unit_mismatch")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
 if __name__ == "__main__":
     unittest.main()
