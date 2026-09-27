@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import StorageFailure
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -300,9 +300,62 @@ CREATE TABLE IF NOT EXISTS observations (
     recorded_by TEXT NOT NULL REFERENCES staff(id),
     provenance TEXT NOT NULL CHECK(provenance IN ('patient','clinician','import')),
     correction_of TEXT REFERENCES observations(id),
+    import_batch_id TEXT,
+    import_row_number INTEGER,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS observations_patient_kind_time ON observations(patient_id,kind,observed_at);
+CREATE INDEX IF NOT EXISTS observations_import_origin ON observations(import_batch_id,import_row_number);
+CREATE TABLE IF NOT EXISTS measurement_batches (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    batch_key TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>=1),
+    source TEXT NOT NULL,
+    format_version TEXT NOT NULL CHECK(format_version IN ('scale_csv_v1','weight_json_v1')),
+    content_hash TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    imported_count INTEGER NOT NULL,
+    review_count INTEGER NOT NULL,
+    duplicate_count INTEGER NOT NULL,
+    correction_count INTEGER NOT NULL,
+    result_json TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL,
+    supersedes TEXT REFERENCES measurement_batches(id),
+    UNIQUE(clinic_id,batch_key,revision)
+);
+CREATE INDEX IF NOT EXISTS measurement_batches_key ON measurement_batches(clinic_id,batch_key,revision DESC);
+CREATE TABLE IF NOT EXISTS measurement_batch_rows (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES measurement_batches(id),
+    row_number INTEGER NOT NULL,
+    row_hash TEXT NOT NULL,
+    raw_excerpt TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('imported','duplicate','review','correction')),
+    issue_code TEXT,
+    patient_id TEXT REFERENCES patients(id),
+    observation_id TEXT REFERENCES observations(id),
+    detail TEXT,
+    UNIQUE(batch_id,row_number)
+);
+CREATE INDEX IF NOT EXISTS measurement_batch_rows_batch ON measurement_batch_rows(batch_id,row_number);
+CREATE TABLE IF NOT EXISTS measurement_review_items (
+    id TEXT PRIMARY KEY,
+    clinic_id TEXT NOT NULL REFERENCES clinics(id),
+    batch_id TEXT NOT NULL REFERENCES measurement_batches(id),
+    row_id TEXT NOT NULL REFERENCES measurement_batch_rows(id),
+    row_number INTEGER NOT NULL,
+    issue_code TEXT NOT NULL,
+    raw_excerpt TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending','resolved','dismissed')),
+    resolution_note TEXT,
+    resolved_by TEXT REFERENCES staff(id),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS measurement_review_pending ON measurement_review_items(clinic_id,status,created_at);
 CREATE TABLE IF NOT EXISTS clinical_flags (
     id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(id),
@@ -398,6 +451,7 @@ class Database:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         try:
             with self.session() as connection:
+                self._migrate(connection)
                 connection.executescript(SCHEMA)
                 connection.execute(
                     "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
@@ -406,6 +460,19 @@ class Database:
                 )
         except sqlite3.Error as exc:
             raise StorageFailure("数据库初始化失败", details={"reason": type(exc).__name__}) from exc
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """为既有数据库补齐新增列；新增列均可为空，不改动历史行。"""
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "observations" not in tables:
+            return
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(observations)").fetchall()}
+        for column in ("import_batch_id", "import_row_number"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE observations ADD COLUMN {column} "
+                                   f"{'TEXT' if column == 'import_batch_id' else 'INTEGER'}")
 
     @contextmanager
     def transaction(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:

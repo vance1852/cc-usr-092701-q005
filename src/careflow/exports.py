@@ -96,7 +96,7 @@ class PatientExportService:
                      "start_date": row["start_date"], "target_date": row["target_date"],
                      "created_at": row["created_at"], "updated_at": row["updated_at"], "version": row["version"]} for row in rows]
         if section == "observations":
-            rows = connection.execute("SELECT id,plan_id,kind,value_num,value_text,unit,observed_at,recorded_by,provenance,correction_of,created_at FROM observations WHERE patient_id=? ORDER BY observed_at,id", (patient_id,)).fetchall()
+            rows = connection.execute("SELECT id,plan_id,kind,value_num,value_text,unit,observed_at,recorded_by,provenance,correction_of,import_batch_id,import_row_number,created_at FROM observations WHERE patient_id=? ORDER BY observed_at,id", (patient_id,)).fetchall()
             return [dict(row) for row in rows]
         if section == "appointments":
             rows = connection.execute("SELECT id,plan_id,staff_id,kind,starts_at,ends_at,state,created_at,version FROM appointments WHERE patient_id=? ORDER BY starts_at,id", (patient_id,)).fetchall()

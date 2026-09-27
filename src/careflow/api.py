@@ -223,6 +223,26 @@ def create_handler(app: Careflow):
                 params = parse_qs(path.query)
                 return app.reports.weight_series(clinic_id, actor_id, segments[1],
                                                  start=params.get("start", [None])[0], end=params.get("end", [None])[0]), 200
+            if self.command == "POST" and segments == ["imports", "measurements"]:
+                data = self.body()
+                return app.imports.import_batch(clinic_id, actor_id, data.get("batch_key", ""),
+                                                data.get("source", ""), data.get("format_version", ""),
+                                                data.get("content", "")), 201
+            if self.command == "GET" and len(segments) == 3 and segments[:2] == ["imports", "measurements"]:
+                return app.imports.get_batch(clinic_id, actor_id, segments[2]), 200
+            if self.command == "GET" and segments == ["imports", "review-items"]:
+                params = parse_qs(path.query)
+                return {"items": app.imports.list_review_items(clinic_id, actor_id,
+                                                               status=params.get("status", ["pending"])[0],
+                                                               limit=int(params.get("limit", [200])[0]))}, 200
+            if self.command == "POST" and len(segments) == 4 and segments[:2] == ["imports", "review-items"] and segments[3] == "resolve":
+                data = self.body()
+                return app.imports.resolve_review_item(clinic_id, actor_id, segments[2],
+                                                       data.get("action", ""), data.get("note", "")), 200
+            if self.command == "POST" and len(segments) == 3 and segments[0] == "observations" and segments[2] == "corrections":
+                data = self.body()
+                return app.imports.correct_observation(clinic_id, actor_id, segments[1],
+                                                       data.get("value"), data.get("reason", "")), 201
             if len(segments) == 3 and segments[0] == "patients" and segments[2] == "plan-history" and self.command == "GET":
                 return app.reports.plan_history(clinic_id, actor_id, segments[1]), 200
             if len(segments) == 3 and segments[0] == "patients" and segments[2] == "export" and self.command == "POST":

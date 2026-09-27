@@ -26,6 +26,13 @@ from .validation import (
 )
 
 
+def _observation_origin(row) -> dict[str, Any] | None:
+    """观察值的导入溯源：指向原文件批次与行号；非导入记录为 None。"""
+    if row["import_batch_id"] is None:
+        return None
+    return {"batch_id": row["import_batch_id"], "row_number": row["import_row_number"]}
+
+
 class Careflow:
     """应用服务。公开方法是业务边界，直接接收已解析 JSON 值。"""
 
@@ -37,11 +44,13 @@ class Careflow:
         from .exports import PatientExportService
         from .milestones import MilestoneService
         from .clinical_flags import ClinicalFlagService
+        from .imports import MeasurementImportService
         self.supplies = SupplyService(self.db, self.clock)
         self.reports = ReportService(self.db, self.clock)
         self.exports = PatientExportService(self.db, self.clock)
         self.milestones = MilestoneService(self.db, self.clock)
         self.clinical_flags = ClinicalFlagService(self.db, self.clock)
+        self.imports = MeasurementImportService(self.db, self.clock)
 
     def now(self) -> str:
         return timestamp(self.clock.now())
@@ -883,7 +892,8 @@ class Careflow:
                 raise NotFound("患者不存在")
             rows = connection.execute("SELECT * FROM observations WHERE patient_id=? AND kind=? ORDER BY observed_at,id", (patient_id, kind)).fetchall()
             return [{"id": row["id"], "value": row["value_num"], "unit": row["unit"], "observed_at": row["observed_at"],
-                     "provenance": row["provenance"], "correction_of": row["correction_of"]} for row in rows]
+                     "provenance": row["provenance"], "correction_of": row["correction_of"],
+                     "origin": _observation_origin(row)} for row in rows]
 
     def report_incident(self, clinic_id: str, actor_id: str, patient_id: str, category: str,
                         severity: str, onset_at: str, summary: str, key: str, *, plan_id: str | None = None,

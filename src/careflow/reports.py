@@ -169,10 +169,16 @@ class ReportService:
             for row in effective:
                 values.append({"id": row["id"], "observed_at": row["observed_at"], "weight_kg": row["value_num"],
                                "recorded_by": row["recorded_by"], "provenance": row["provenance"],
-                               "corrects": row["correction_of"]})
+                               "corrects": row["correction_of"],
+                               "origin": {"batch_id": row["import_batch_id"], "row_number": row["import_row_number"]}
+                               if row["import_batch_id"] else None})
             delta = round(values[-1]["weight_kg"] - values[0]["weight_kg"], 2) if len(values) >= 2 else None
+            by_source = {"patient": 0, "clinician": 0, "device_import": 0}
+            for row in effective:
+                by_source["device_import" if row["provenance"] == "import" else row["provenance"]] += 1
             return {"patient_id": patient_id, "patient_ref": patient["external_ref"], "patient_state": patient["state"],
                     "observations": values, "count": len(values), "first_to_last_delta_kg": delta,
+                    "count_by_source": by_source,
                     "interpretation": "仅展示已记录测量，不构成诊断或治疗建议。"}
 
     def plan_history(self, clinic_id: str, actor_id: str, patient_id: str) -> dict:
